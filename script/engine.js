@@ -75,7 +75,7 @@
 			debug: false,
 			log: false,
 			dropbox: false,
-			doubleTime: false
+			doubleTime: true
 		},
 
 		init: function(options) {
@@ -102,6 +102,15 @@
 				window.State = this.options.state;
 			} else {
 				Engine.loadGame();
+			}
+
+			// start loading music and events early
+			for (var key in AudioLibrary) {
+				if (
+					key.toString().indexOf('MUSIC_') > -1 ||
+					key.toString().indexOf('EVENT_') > -1) {
+						AudioEngine.loadAudioFile(AudioLibrary[key]);
+					}
 			}
 
 			$('<div>').attr('id', 'locationSlider').appendTo('#main');
@@ -132,6 +141,12 @@
 						.appendTo(optionsList);
 				});
 			}
+
+			$('<span>')
+				.addClass('volume menuBtn')
+				.text(_('sound off.'))
+				.click(Engine.toggleVolume)
+				.appendTo(menu);
 
 			$('<span>')
 				.addClass('appStore menuBtn')
@@ -200,9 +215,11 @@
 			$.Dispatch('stateUpdate').subscribe(Engine.handleStateUpdates);
 
 			$SM.init();
+			AudioEngine.init();
 			Notifications.init();
 			Events.init();
 			Room.init();
+
 
 			if(typeof $SM.get('stores.wood') != 'undefined') {
 				Outside.init();
@@ -215,18 +232,33 @@
 			}
 
 			if($SM.get('config.lightsOff', true)){
-					Engine.turnLightsOff();
+				Engine.turnLightsOff();
 			}
 
 			if($SM.get('config.hyperMode', true)){
-					Engine.triggerHyperMode();
+				Engine.triggerHyperMode();
 			}
 
+			if(!AudioEngine.isAudioContextRunning()){
+				document.addEventListener('click', Engine.resumeAudioContext);
+			}
+			
 			Engine.saveLanguage();
 			Engine.travelTo(Room);
 
 		},
+		resumeAudioContext: function () {
+			AudioEngine.tryResumingAudioContext();
+			
+			// turn on music!
+			if (AudioEngine._audioContext.state !== 'suspended') {
+				$('.volume').text(_('sound off.'));
+				$SM.set('config.soundOn', true);
+				AudioEngine.setMasterVolume(1.0);
+			}
 
+			document.removeEventListener('click', Engine.resumeAudioContext);
+		},
 		browserValid: function() {
 			return ( location.search.indexOf( 'ignorebrowser=true' ) >= 0 || ( typeof Storage != 'undefined' && !oldIE ) );
 		},
@@ -596,7 +628,6 @@
 				Engine.activeModule = module;
 				module.onArrival(diff);
 				Notifications.printQueue(module);
-
 			}
 		},
 
@@ -782,6 +813,18 @@
 			}
 		},
 
+		toggleVolume: function() {
+			if ($SM.get('config.soundOn')) {
+				$('.volume').text(_('sound on.'));
+				$SM.set('config.soundOn', false);
+				AudioEngine.setMasterVolume(0.0);
+			} else {
+				$('.volume').text(_('sound off.'));
+				$SM.set('config.soundOn', true);
+				AudioEngine.setMasterVolume(1.0);
+			}
+		},
+
 		setInterval: function(callback, interval, skipDouble){
 			if( Engine.options.doubleTime && !skipDouble ){
 				Engine.log('Double time, cutting interval in half');
@@ -800,6 +843,118 @@
 			}
 
 			return setTimeout(callback, timeout);
+
+		},
+
+		enableGodMode: function() {
+			// add all remaining craftables and goods
+			var buildSection = $('#buildBtns');
+			if (buildSection.length === 0) {
+				buildSection = $('<div>').attr({ 'id': 'buildBtns', 'data-legend': _('build:') }).css('opacity', 0);
+				buildSection.appendTo('div#roomPanel').animate({ opacity: 1 }, 300, 'linear');
+			}
+			var craftSection = $('#craftBtns');
+			if (craftSection.length === 0) {
+				craftSection = $('<div>').attr({ 'id': 'craftBtns', 'data-legend': _('craft:') }).css('opacity', 0);
+				craftSection.appendTo('div#roomPanel').animate({ opacity: 1 }, 300, 'linear');
+			}
+
+			var buySection = $('#buyBtns');
+			if (buySection.length === 0) {
+				buySection = $('<div>').attr({ 'id': 'buyBtns', 'data-legend': _('buy:') }).css('opacity', 0);
+				buySection.appendTo('div#roomPanel').animate({ opacity: 1 }, 300, 'linear');
+			}
+
+			for (var k in Room.Craftables) {
+				craftable = Room.Craftables[k];
+				if (craftable.button == null) {
+					var loc = Room.needsWorkshop(craftable.type) ? craftSection : buildSection;
+					craftable.button = new Button.Button({
+						id: 'build_' + k,
+						cost: craftable.cost(),
+						text: _(k),
+						click: Room.build,
+						width: '80px',
+						ttPos: loc.children().length > 10 ? 'top right' : 'bottom right'
+					}).css('opacity', 0).attr('buildThing', k).appendTo(loc).animate({ opacity: 1 }, 300, 'linear');
+				}
+
+				var max = $SM.num(k, craftable) + 1 > craftable.maximum;
+				if (max) {
+					Button.setDisabled(craftable.button, true);
+				} else {
+					Button.setDisabled(craftable.button, false);
+				}
+			}
+
+			for (var g in Room.TradeGoods) {
+				good = Room.TradeGoods[g];
+				if (good.button == null) {
+					good.button = new Button.Button({
+						id: 'build_' + g,
+						cost: good.cost(),
+						text: _(g),
+						click: Room.buy,
+						width: '80px',
+						ttPos: buySection.children().length > 10 ? 'top right' : 'bottom right'
+					}).css('opacity', 0).attr('buildThing', g).appendTo(buySection).animate({ opacity: 1 }, 300, 'linear');
+				}
+
+				var goodsMax = $SM.num(g, good) + 1 > good.maximum;
+				if (goodsMax) {
+					Button.setDisabled(good.button, true);
+				} else {
+					Button.setDisabled(good.button, false);
+				}
+			}
+
+			// set water/health
+			Path.DEFAULT_BAG_SPACE = 1000;
+			World.BASE_WATER = 1000;
+			World.BASE_HEALTH = 1000;
+			World.setHp(1000);
+			
+			// add all perks
+			for (var key in Engine.Perks) {
+				$SM.addPerk(key);
+			}
+
+			// give 100000 of all stores
+			for (var i = 0; i < Prestige.storesMap.length; i++) {
+				State.stores[Prestige.storesMap[i].store] = 100000;
+
+			}
+			for (var key in Room.TradeGoods) {
+				State.stores[key] = 100000;
+			}
+
+			// open up all section
+			if(!Outside.tab) {
+				Outside.init();
+			}
+
+			if(!Path.tab) {
+				Path.init();
+			}
+			
+			if(!Ship.tab) {
+				Ship.init();
+			}
+
+			// set world map mask to reveal entire map
+			for(var j = 0; j <= World.RADIUS * 2; j++) {
+				for(var i = 0; i <= World.RADIUS * 2; i++) {
+					State.game.world.mask[i][j] = true;
+				}
+			}
+
+			// remove all cooldowns
+			$('.button').each(function (i, el) {
+				$(el).off('click');
+				$(el).click(function() {
+					$(this).data("handler")($(this));
+				})
+			});
 
 		}
 
